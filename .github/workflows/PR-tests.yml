@@ -161,9 +161,49 @@ jobs:
           HTTPServer(("127.0.0.1", 18768), Handler).handle_request()
           "@ | Set-Content -Path $serverPath -Encoding utf8
 
-          $server = Start-Process python -ArgumentList "`"$serverPath`" `"$bodyPath`" `"$countPath`"" -PassThru -NoNewWindow
+          $pythonCandidates = @(
+            @{ FilePath = "py"; Arguments = @("-3", $serverPath, $bodyPath, $countPath) },
+            @{ FilePath = "python"; Arguments = @($serverPath, $bodyPath, $countPath) },
+            @{ FilePath = "python3"; Arguments = @($serverPath, $bodyPath, $countPath) }
+          )
+          $pythonCommand = $pythonCandidates |
+            Where-Object { Get-Command $_.FilePath -ErrorAction SilentlyContinue } |
+            Select-Object -First 1
+          if (!$pythonCommand) {
+            Write-Error "No Python interpreter found to launch the mock host-checker server."
+          }
+
+          $server = Start-Process -FilePath $pythonCommand.FilePath -ArgumentList $pythonCommand.Arguments -PassThru -NoNewWindow
           try {
-            Start-Sleep -Seconds 2
+            $serverReady = $false
+            $deadline = (Get-Date).AddSeconds(15)
+            while ((Get-Date) -lt $deadline) {
+              if ($server.HasExited) {
+                break
+              }
+
+              $client = $null
+              try {
+                $client = [System.Net.Sockets.TcpClient]::new()
+                $connectTask = $client.ConnectAsync("127.0.0.1", 18768)
+                if ($connectTask.Wait(500) -and $client.Connected) {
+                  $serverReady = $true
+                  break
+                }
+              } catch {
+              } finally {
+                if ($client) {
+                  $client.Dispose()
+                }
+              }
+
+              Start-Sleep -Milliseconds 250
+            }
+
+            if (!$serverReady) {
+              Write-Error "Mock host-checker server did not become ready before winPEAS execution."
+            }
+
             $env:HACKTRICKS_HOST_CHECKER_URL = "http://127.0.0.1:18768/api/host-checker"
             $output = & $exePath applicationsinfo -vulnpackages notcolor 2>&1 | Out-String
 
